@@ -13,21 +13,15 @@ import time
 import queue
 import json
 import threading
-import jwt
-from streamlit_autorefresh import st_autorefresh
 
 # Load environment variables
 load_dotenv()
 PINATA_API_KEY = os.getenv("PINATA_API_KEY")
 PINATA_API_SECRET = os.getenv("PINATA_API_SECRET")
-PINATA_JWT = os.getenv("PINATA_JWT")  # Add this to your .env file
-PINATA_GROUP_ID = "c3f85477-d28f-4c60-aafe-0729afe405ef"
+PINATA_GROUP_ID = "c3f85477-d28f-4c60-aafe-0729afe405ef"  # SIH group ID
 
 # Streamlit page config
 st.set_page_config(page_title="MP Police Attendance System", layout="wide")
-
-# Auto refresh every second for real-time clock
-st_autorefresh(interval=1000, key="clock_refresh")
 
 # Custom CSS
 st.markdown("""
@@ -95,183 +89,16 @@ if 'recognition_times' not in st.session_state:
     st.session_state.recognition_times = {}
 if 'uploaded_photos' not in st.session_state:
     st.session_state.uploaded_photos = []
-if 'camera_error' not in st.session_state:
-    st.session_state.camera_error = None
 
-def get_pinata_headers():
-    if PINATA_JWT:
-        return {'Authorization': f'Bearer {PINATA_JWT}'}
-    return {
-        'pinata_api_key': PINATA_API_KEY,
-        'pinata_secret_api_key': PINATA_API_SECRET
-    }
-
-def fetch_pinata_files():
-    try:
-        # First try with JWT
-        url = "https://api.pinata.cloud/data/pinList"
-        headers = get_pinata_headers()
-        
-        params = {
-            'status': 'pinned',
-            'metadata[keyvalues]': json.dumps({
-                'group': {'value': PINATA_GROUP_ID, 'op': 'eq'}
-            }),
-            'pageLimit': 1000
-        }
-        
-        response = requests.get(url, headers=headers, params=params)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"Failed to fetch files: {response.status_code}")
-            return None
-            
-    except Exception as e:
-        st.error(f"Error fetching from Pinata: {str(e)}")
-        return None
-
-def process_ipfs_image(ipfs_hash):
-    try:
-        url = f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            # Convert to PIL Image
-            image = Image.open(io.BytesIO(response.content))
-            
-            # Convert to RGB if needed
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-                
-            # Convert to numpy array
-            img_array = np.array(image)
-            
-            return img_array, url
-        return None, None
-    except Exception as e:
-        st.error(f"Error processing IPFS image: {str(e)}")
-        return None, None
-
-def initialize_camera():
-    try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            raise Exception("Could not open camera")
-        
-        # Set camera properties
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        
-        # Test frame grab
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            raise Exception("Could not read frame")
-            
-        return cap
-    except Exception as e:
-        st.session_state.camera_error = str(e)
-        return None
-
-def process_frame(frame):
-    if frame is None:
-        return None
-        
-    # Convert BGR to RGB
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    # Create a copy for face detection
-    frame_for_detection = frame_rgb.copy()
-    
-    # Resize for face detection (smaller for speed)
-    small_frame = cv2.resize(frame_for_detection, (0, 0), fx=0.25, fy=0.25)
-    
-    return frame_rgb, small_frame
-
-def check_new_pinata_files():
-    try:
-        pinata_data = fetch_pinata_files()
-        if not pinata_data:
-            return
-
-        new_files_found = False
-        for item in pinata_data.get("rows", []):
-            ipfs_hash = item["ipfs_pin_hash"]
-            if ipfs_hash not in st.session_state.pinata_hashes:
-                img, url = process_ipfs_image(ipfs_hash)
-                if img is not None:
-                    encoding = encode_face(img)
-                    if encoding is not None:
-                        name = item.get("metadata", {}).get("name", "Unknown").split('.')[0]
-                        st.session_state.encoding_queue.put({
-                            'encoding': encoding,
-                            'name': name
-                        })
-                        st.session_state.pinata_hashes.add(ipfs_hash)
-                        st.session_state.uploaded_photos.append({
-                            'name': name,
-                            'url': url
-                        })
-                        new_files_found = True
-
-        if new_files_found:
-            st.experimental_rerun()
-
-        st.session_state.last_pinata_check = datetime.now()
-        
-    except Exception as e:
-        st.error(f"Error checking Pinata files: {str(e)}")
-
-def encode_face(image):
-    try:
-        if image is None:
-            return None
-            
-        # Ensure image is RGB
-        if len(image.shape) == 2:  # Grayscale
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        elif image.shape[2] == 4:  # RGBA
-            image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-            
-        # Convert BGR to RGB if necessary
-        if image.shape[2] == 3 and not isinstance(image, np.ndarray):
-            image = np.array(image)
-            
-        encodings = face_recognition.face_encodings(image)
-        if encodings:
-            return encodings[0]
-        return None
-    except Exception as e:
-        st.error(f"Error encoding face: {str(e)}")
-        return None
-
-def process_encoding_queue():
-    while not st.session_state.encoding_queue.empty():
-        data = st.session_state.encoding_queue.get()
-        if data['name'] not in st.session_state.class_names:
-            st.session_state.encode_list_known.append(data['encoding'])
-            st.session_state.class_names.append(data['name'])
-            st.success(f"Added new face encoding for: {data['name']}")
-
-def mark_attendance(name):
-    try:
-        with open('Attendance.csv', 'a') as f:
-            now = datetime.now()
-            date_string = now.strftime('%B %d, %Y')
-            time_string = now.strftime('%H:%M:%S')
-            f.write(f'{name},{date_string},{time_string}\n')
-            
-        # Store recognition time
-        st.session_state.recognition_times[name] = now
-    except Exception as e:
-        st.error(f"Error marking attendance: {str(e)}")
-
-def upload_thread(file_content, filename):
+def upload_to_pinata(file_content, filename):
     try:
         url = "https://api.pinata.cloud/pinning/pinFileToIPFS"
-        headers = get_pinata_headers()
+        headers = {
+            'pinata_api_key': PINATA_API_KEY,
+            'pinata_secret_api_key': PINATA_API_SECRET
+        }
         
+        # Convert StreamlitUploadedFile to bytes
         if hasattr(file_content, 'getvalue'):
             file_data = file_content.getvalue()
         else:
@@ -291,32 +118,145 @@ def upload_thread(file_content, filename):
         data = {
             'pinataMetadata': json.dumps(metadata),
             'pinataOptions': json.dumps({
-                'cidVersion': 0
+                'cidVersion': 0,
+                'customPinPolicy': {
+                    'regions': [
+                        {
+                            'id': 'FRA1',
+                            'desiredReplicationCount': 1
+                        }
+                    ]
+                }
             })
         }
         
         response = requests.post(url, files=files, headers=headers, data=data)
-        
-        if response.status_code == 200 and 'IpfsHash' in response.json():
-            st.success(f"Image uploaded successfully for {filename}")
-            check_new_pinata_files()
-        else:
-            st.error(f"Failed to upload image: {response.text}")
-            
+        return response.json()
     except Exception as e:
-        st.error(f"Error in upload thread: {str(e)}")
+        st.error(f"Error uploading to Pinata: {str(e)}")
+        return None
+
+def fetch_pinata_files():
+    try:
+        url = "https://api.pinata.cloud/data/pinList"
+        headers = {
+            'pinata_api_key': PINATA_API_KEY,
+            'pinata_secret_api_key': PINATA_API_SECRET
+        }
+        params = {
+            'metadata[keyvalues]': json.dumps({
+                'group': {'value': PINATA_GROUP_ID, 'op': 'eq'}
+            })
+        }
+        response = requests.get(url, headers=headers, params=params)
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching from Pinata: {str(e)}")
+        return None
+
+def process_ipfs_image(ipfs_hash):
+    try:
+        url = f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            # Open image with PIL and convert to RGB
+            image = Image.open(io.BytesIO(response.content)).convert('RGB')
+            # Convert to numpy array
+            img_array = np.array(image)
+            return img_array, url
+        return None, None
+    except Exception as e:
+        st.error(f"Error processing IPFS image: {str(e)}")
+        return None, None
+
+def encode_face(image):
+    try:
+        if image is None:
+            return None
+            
+        # Ensure image is RGB
+        if len(image.shape) == 2:  # Grayscale
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.shape[2] == 4:  # RGBA
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        elif image.shape[2] == 3 and not isinstance(image, np.ndarray):
+            image = np.array(image)
+            
+        encodings = face_recognition.face_encodings(image)
+        if encodings:
+            return encodings[0]
+        return None
+    except Exception as e:
+        st.error(f"Error encoding face: {str(e)}")
+        return None
+
+def check_new_pinata_files():
+    try:
+        pinata_data = fetch_pinata_files()
+        if not pinata_data:
+            return
+
+        for item in pinata_data.get("rows", []):
+            ipfs_hash = item["ipfs_pin_hash"]
+            if ipfs_hash not in st.session_state.pinata_hashes:
+                img, url = process_ipfs_image(ipfs_hash)
+                if img is not None:
+                    encoding = encode_face(img)
+                    if encoding is not None:
+                        name = item.get("metadata", {}).get("name", "Unknown").split('.')[0]
+                        st.session_state.encoding_queue.put({
+                            'encoding': encoding,
+                            'name': name
+                        })
+                        st.session_state.pinata_hashes.add(ipfs_hash)
+                        st.session_state.uploaded_photos.append({
+                            'name': name,
+                            'url': url
+                        })
+
+        st.session_state.last_pinata_check = datetime.now()
+        
+    except Exception as e:
+        st.error(f"Error checking Pinata files: {str(e)}")
+
+def process_encoding_queue():
+    while not st.session_state.encoding_queue.empty():
+        data = st.session_state.encoding_queue.get()
+        st.session_state.encode_list_known.append(data['encoding'])
+        st.session_state.class_names.append(data['name'])
+        st.success(f"Added new face encoding for: {data['name']}")
+
+def mark_attendance(name):
+    try:
+        with open('Attendance.csv', 'a') as f:
+            now = datetime.now()
+            date_string = now.strftime('%B %d, %Y')
+            time_string = now.strftime('%H:%M:%S')
+            f.write(f'{name},{date_string},{time_string}\n')
+            
+        # Store recognition time
+        st.session_state.recognition_times[name] = now
+    except Exception as e:
+        st.error(f"Error marking attendance: {str(e)}")
+
+def upload_thread(file_content, filename):
+    response = upload_to_pinata(file_content, filename)
+    if response and 'IpfsHash' in response:
+        st.success(f"Image uploaded successfully for {filename}")
+        check_new_pinata_files()
+    else:
+        st.error("Failed to upload image")
 
 def main():
     st.title("Madhya Pradesh Police Attendance System")
 
-    # Initialize system and fetch existing photos
+    # Initialize system
     if not st.session_state.initialization_done:
-        with st.spinner("Initializing system and fetching existing photos..."):
+        with st.spinner("Initializing system..."):
             check_new_pinata_files()
-            process_encoding_queue()
             st.session_state.initialization_done = True
 
-    # Current Date and Time Display (updates every second due to st_autorefresh)
+    # Current Date and Time Display
     current_time = datetime.now()
     st.markdown(f"""
         <div class="current-time">
@@ -335,6 +275,7 @@ def main():
             if st.button("Upload"):
                 if uploaded_file is not None and person_name:
                     file_name = f"{person_name}.{uploaded_file.name.split('.')[-1]}"
+                    # Start upload in a separate thread
                     thread = threading.Thread(
                         target=upload_thread,
                         args=(uploaded_file, file_name)
@@ -347,7 +288,7 @@ def main():
         if st.session_state.last_pinata_check:
             status_placeholder.info(
                 f"Last IPFS check: {st.session_state.last_pinata_check.strftime('%H:%M:%S')}\n"
-                f"Known faces: {len(st.session_state.class_names)}"
+                f"Known faces: {len(st.session_state.encode_list_known)}"
             )
 
         # Recognition Times Display
@@ -359,39 +300,27 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-        # Display uploaded photos
-        st.subheader("Uploaded Photos")
-        if st.session_state.uploaded_photos:
-            uploaded_photos_html = '<div class="uploaded-photos">'
-            for photo in st.session_state.uploaded_photos:
-                uploaded_photos_html += f'<img src="{photo["url"]}" alt="{photo["name"]}" class="uploaded-photo">'
-            uploaded_photos_html += '</div>'
-            st.markdown(uploaded_photos_html, unsafe_allow_html=True)
-        else:
-            st.info("No photos uploaded yet")
-
         st.subheader("Attendance Log")
         if os.path.exists('Attendance.csv'):
             df = pd.read_csv('Attendance.csv', names=['Name', 'Date', 'Time'])
             st.dataframe(df)
 
+        # Display uploaded photos
+        st.subheader("Uploaded Photos")
+        uploaded_photos_html = '<div class="uploaded-photos">'
+        for photo in st.session_state.uploaded_photos:
+            uploaded_photos_html += f'<img src="{photo["url"]}" alt="{photo["name"]}" class="uploaded-photo">'
+        uploaded_photos_html += '</div>'
+        st.markdown(uploaded_photos_html, unsafe_allow_html=True)
+
     with col1:
         st.subheader("Camera Feed")
         frame_placeholder = st.empty()
 
-        # Initialize camera
-        if st.session_state.camera_error:
-            st.error(f"Camera error: {st.session_state.camera_error}")
-            return
-
-        cap = initialize_camera()
-        if cap is None:
-            st.error("Failed to initialize camera")
-            return
-
+        cap = cv2.VideoCapture(0)
+        
         try:
-            while True:
-                # Check for new Pinata files every 5 seconds
+            while cap.isOpened():
                 if (st.session_state.last_pinata_check is None or 
                     (datetime.now() - st.session_state.last_pinata_check).seconds >= 5):
                     check_new_pinata_files()
@@ -403,10 +332,18 @@ def main():
                     st.warning("Failed to grab frame from camera")
                     continue
 
-                # Process frame
-                frame_rgb, small_frame = process_frame(frame)
-                if frame_rgb is None:
+                # Ensure frame is in RGB format
+                if len(frame.shape) == 2:  # Grayscale
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                elif frame.shape[2] == 3:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif frame.shape[2] == 4:  # RGBA
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+                else:
+                    st.error(f"Unsupported image format: {frame.shape}")
                     continue
+
+                small_frame = cv2.resize(frame_rgb, (0, 0), fx=0.25, fy=0.25)
 
                 face_locations = face_recognition.face_locations(small_frame)
                 face_encodings = face_recognition.face_encodings(small_frame, face_locations)
